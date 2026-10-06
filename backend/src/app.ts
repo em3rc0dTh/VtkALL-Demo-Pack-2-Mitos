@@ -25,30 +25,6 @@ import clientTypeRoutes from './routes/clientTypeRoutes'
 import odooRoutes from './routes/odooRoutes'
 import * as helper from './utils/helper'
 
-const diagnosticPaymentId = process.env.MP_DIAGNOSTIC_PAYMENT_ID
-if (diagnosticPaymentId && env.MERCADO_PAGO_ACCESS_TOKEN) {
-  fetch(`https://api.mercadopago.com/v1/payments/${encodeURIComponent(diagnosticPaymentId)}`, {
-    headers: { Authorization: `Bearer ${env.MERCADO_PAGO_ACCESS_TOKEN}` },
-  })
-    .then(async (response) => {
-      if (!response.ok) {
-        console.error('[MP diagnostic] read-back failed', response.status)
-        return
-      }
-      const payment = await response.json() as any
-      console.info('[MP diagnostic]', {
-        id: String(payment.id),
-        collectorId: String(payment.collector_id),
-        currency: payment.currency_id,
-        liveMode: payment.live_mode,
-        paymentMethodId: payment.payment_method_id,
-        status: payment.status,
-        transactionAmount: payment.transaction_amount,
-      })
-    })
-    .catch(() => console.error('[MP diagnostic] read-back failed'))
-}
-
 const app = express()
 
 app.use(helmet.contentSecurityPolicy())

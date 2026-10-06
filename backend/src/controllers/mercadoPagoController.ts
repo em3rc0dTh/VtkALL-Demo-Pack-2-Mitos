@@ -1,116 +1,125 @@
-import { randomUUID } from 'node:crypto'
 import { Request, Response } from 'express'
-import { MercadoPagoConfig, Payment } from 'mercadopago'
-import * as env from '../config/env.config'
-import * as bookcarsTypes from ':bookcars-types'
-import i18n from '../lang/i18n'
+import { PaymentError } from '@em3rc0d/m-pago'
+import { getFrozenPaymentQuote } from '../services/bookingPricingService'
+import {
+  dispatchPaymentEvents,
+  getBookingPaymentContext,
+  hasRealWebhookSecret,
+  operatorContext,
+  paymentService,
+} from '../services/mitosPaymentService'
+import * as logger from '../utils/logger'
 
-const client = new MercadoPagoConfig({ accessToken: env.MERCADO_PAGO_ACCESS_TOKEN })
-const payment = new Payment(client)
+const sendError = (res: Response, err: unknown) => {
+  if (err instanceof PaymentError) {
+    res.status(err.status || 409).json({ error: err.code })
+    return
+  }
+  logger.error('[MercadoPago] payment integration failure', err)
+  res.status(500).json({ error: 'PAYMENT_FAILURE' })
+}
 
-/**
- * Create a Mercado Pago payment.
- *
- * @param {Request} req
- * @param {Response} res
- * @returns {Promise<Response>}
- */
+export const quotePayment = async (req: Request, res: Response) => {
+  try {
+    const bookingId = String(req.params.bookingId || '')
+    const sessionId = String(req.params.sessionId || '')
+    const quote = await getFrozenPaymentQuote(bookingId, sessionId)
+    res.json({
+      bookingId,
+      amount: quote.amountMinor / (10 ** quote.exponent),
+      amountMinor: quote.amountMinor,
+      currency: quote.currency,
+      exponent: quote.exponent,
+      version: quote.version,
+    })
+  } catch (err) {
+    sendError(res, err)
+  }
+}
+
 export const createPayment = async (req: Request, res: Response) => {
-    try {
-        const { body }: { body: bookcarsTypes.CreatePaymentPayload & {
-            token?: string
-            installments?: number | string
-            paymentMethodId?: string
-            payment_method_id?: string
-            issuerId?: string | number
-            issuer_id?: string | number
-            transaction_amount?: number | string
-            payer?: any
-        } } = req
+  try {
+    const bookingId = String(req.body?.bookingId || '')
+    const reservationSessionId = String(req.body?.reservationSessionId || '')
+    const idempotencyKey = String(req.headers['x-idempotency-key'] || '').trim()
+    const token = req.body?.instrument?.token ?? req.body?.token
+    const paymentMethodId = req.body?.instrument?.paymentMethodId
+      ?? req.body?.paymentMethodId
+      ?? req.body?.payment_method_id
+    const installments = req.body?.instrument?.installments ?? req.body?.installments ?? 1
+    const issuerId = req.body?.instrument?.issuerId ?? req.body?.issuerId ?? req.body?.issuer_id
 
-        // Payment Brick uses snake_case while some older/custom integrations use
-        // camelCase. Normalize both so the backend is independent of SDK shape.
-        const amount = Number(body.amount ?? body.transaction_amount)
-        const paymentMethodId = body.paymentMethodId ?? body.payment_method_id
-        const issuerId = body.issuerId ?? body.issuer_id
-        const token = body.token
-        const installments = Number(body.installments || 1)
-        const payerEmail = body.payer?.email
-        const identification = body.payer?.identification
-        const identificationType = identification?.type ?? identification?.docType
-        const identificationNumber = identification?.number ?? identification?.docNumber
-
-        if (!amount || !paymentMethodId || !token || !payerEmail) {
-            console.error('[MercadoPago.createPayment] Invalid payment payload', {
-                hasAmount: Boolean(amount),
-                paymentMethodId,
-                hasToken: Boolean(token),
-                hasPayerEmail: Boolean(payerEmail),
-            })
-            return res.status(400).json({ error: i18n.t('ERROR') })
-        }
-
-        let paymentData: any = {
-            transaction_amount: amount,
-            description: body.description || 'MITOS Rent a Car',
-            payment_method_id: paymentMethodId,
-            payer: {
-                email: payerEmail,
-            },
-        }
-
-        if (paymentMethodId === 'yape') {
-            paymentData = {
-                ...paymentData,
-                token,
-                installments: 1,
-            }
-        } else {
-            paymentData = {
-                ...paymentData,
-                token,
-                installments,
-                payer: {
-                    ...paymentData.payer,
-                    ...(identificationType && identificationNumber
-                        ? {
-                            identification: {
-                                type: identificationType,
-                                number: identificationNumber,
-                            },
-                        }
-                        : {}),
-                },
-            }
-
-            if (issuerId) {
-                paymentData.issuer_id = issuerId
-            }
-        }
-
-        // Mercado Pago requires idempotency protection for payment creation.
-        const data = await payment.create({
-            body: paymentData,
-            requestOptions: { idempotencyKey: randomUUID() },
-        })
-
-        const responseData: any = {
-            status: data.status,
-            id: data.id,
-        }
-
-        if (data.point_of_interaction?.transaction_data) {
-            responseData.qr_code_base64 = data.point_of_interaction.transaction_data.qr_code_base64
-            responseData.qr_code = data.point_of_interaction.transaction_data.qr_code
-        }
-
-        if (data.transaction_details?.external_resource_url) {
-            responseData.external_resource_url = data.transaction_details.external_resource_url
-        }
-
-        return res.status(201).json(responseData)
-    } catch (err) {
-        console.error(`[MercadoPago.createPayment] ${i18n.t('ERROR')}`, err)
-        return res.status(400).json({ error: i18n.t('ERROR') })
+    if (!bookingId || !reservationSessionId || !idempotencyKey || !token || !paymentMethodId) {
+      res.status(400).json({ error: 'INVALID_PAYMENT_REQUEST' })
+      return
     }
+
+    await getFrozenPaymentQuote(bookingId, reservationSessionId)
+    const { context, payableId } = await getBookingPaymentContext(bookingId, reservationSessionId)
+    const payment = await paymentService.create(context, {
+      payableId,
+      idempotencyKey,
+      instrument: {
+        token: String(token),
+        paymentMethodId: String(paymentMethodId),
+        installments: Number(installments || 1),
+        ...(issuerId ? { issuerId: String(issuerId) } : {}),
+      },
+    })
+
+    await dispatchPaymentEvents()
+
+    res.status(201).json({
+      bookingId,
+      paymentId: payment.id,
+      id: payment.providerId,
+      providerId: payment.providerId,
+      status: payment.status,
+      amountMinor: payment.amountMinor,
+      currency: payment.currency,
+    })
+  } catch (err) {
+    sendError(res, err)
+  }
+}
+
+export const getPayment = async (req: Request, res: Response) => {
+  try {
+    const bookingId = String(req.params.bookingId || '')
+    const sessionId = String(req.params.sessionId || '')
+    const paymentId = String(req.params.paymentId || '')
+    const { context, payableId } = await getBookingPaymentContext(bookingId, sessionId)
+    const payment = await paymentService.get(context, { payableId, paymentId })
+    res.json(payment)
+  } catch (err) {
+    sendError(res, err)
+  }
+}
+
+export const webhook = async (req: Request, res: Response) => {
+  try {
+    if (!hasRealWebhookSecret()) {
+      res.status(503).json({ error: 'WEBHOOK_NOT_CONFIGURED' })
+      return
+    }
+    const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim()
+    const host = req.get('host')
+    const url = new URL(req.originalUrl, `${proto}://${host}`).toString()
+    const result = await paymentService.webhook({ url, headers: req.headers })
+    await dispatchPaymentEvents()
+    res.json(result)
+  } catch (err) {
+    sendError(res, err)
+  }
+}
+
+export const reconcilePayment = async (req: Request, res: Response) => {
+  try {
+    const paymentId = String(req.params.paymentId || '')
+    const payment = await paymentService.reconcile(operatorContext, paymentId)
+    await dispatchPaymentEvents()
+    res.json(payment)
+  } catch (err) {
+    sendError(res, err)
+  }
 }
