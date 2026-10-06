@@ -8,12 +8,19 @@ export interface MercadoPagoQuote {
 
 export interface MercadoPagoPaymentResponse {
   bookingId: string
-  status: 'pending' | 'approved' | 'rejected' | 'refunded' | 'failed'
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled' | 'refunded' | 'charged_back' | 'in_mediation' | 'unknown' | 'creating'
+  paymentId?: string
   id?: string
-  qr_code_base64?: string
-  qr_code?: string
-  external_resource_url?: string
-  idempotentReplay?: boolean
+  providerId?: string
+  amountMinor?: number
+  currency?: string
+}
+
+export interface MercadoPagoInstrument {
+  token: string
+  paymentMethodId: string
+  installments: number
+  issuerId?: string
 }
 
 /**
@@ -50,42 +57,24 @@ export const quotePayment = (
  * Browser-computed amount/currency are deliberately excluded: the backend owns
  * pricing and sends transaction_amount to Mercado Pago.
  */
-export const createPayment = ({
+export const createInstrumentPayment = ({
   bookingId,
   reservationSessionId,
-  formData,
-  payerEmail,
+  instrument,
   idempotencyKey,
 }: {
   bookingId: string
   reservationSessionId: string
-  formData: MercadoPagoBrickFormData
-  payerEmail: string
+  instrument: MercadoPagoInstrument
   idempotencyKey: string
-}): Promise<MercadoPagoPaymentResponse> => {
-  const identification = formData.payer?.identification
-
-  return axiosInstance
+}): Promise<MercadoPagoPaymentResponse> =>
+  axiosInstance
     .post(
       '/api/create-mercadopago-payment',
       {
         bookingId,
         reservationSessionId,
-        token: formData.token,
-        installments: formData.installments,
-        paymentMethodId: formData.payment_method_id,
-        issuerId: formData.issuer_id,
-        payer: {
-          email: payerEmail,
-          ...(identification?.type && identification?.number
-            ? {
-                identification: {
-                  docType: identification.type,
-                  docNumber: identification.number,
-                },
-              }
-            : {}),
-        },
+        instrument,
       },
       {
         headers: {
@@ -94,6 +83,33 @@ export const createPayment = ({
       },
     )
     .then((res) => res.data)
+
+export const createPayment = ({
+  bookingId,
+  reservationSessionId,
+  formData,
+  idempotencyKey,
+}: {
+  bookingId: string
+  reservationSessionId: string
+  formData: MercadoPagoBrickFormData
+  idempotencyKey: string
+}): Promise<MercadoPagoPaymentResponse> => {
+  if (!formData.token || !formData.payment_method_id) {
+    return Promise.reject(new Error('INVALID_PAYMENT_INSTRUMENT'))
+  }
+
+  return createInstrumentPayment({
+    bookingId,
+    reservationSessionId,
+    idempotencyKey,
+    instrument: {
+      token: formData.token,
+      paymentMethodId: formData.payment_method_id,
+      installments: Number(formData.installments || 1),
+      ...(formData.issuer_id ? { issuerId: formData.issuer_id } : {}),
+    },
+  })
 }
 
 export const reconcilePayment = (paymentId: string): Promise<MercadoPagoPaymentResponse> =>

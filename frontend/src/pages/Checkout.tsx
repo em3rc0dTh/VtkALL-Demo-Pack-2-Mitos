@@ -59,6 +59,7 @@ import Map from '@/components/Map'
 import DriverLicense from '@/components/DriverLicense'
 import Progress from '@/components/Progress'
 import CheckoutStatus from '@/components/CheckoutStatus'
+import YapePayment from '@/components/YapePayment'
 import NoMatch from './NoMatch'
 import CheckoutOptions from '@/components/CheckoutOptions'
 import Footer from '@/components/Footer'
@@ -121,7 +122,7 @@ const Checkout = () => {
   const [mercadoPagoReady, setMercadoPagoReady] = useState(false)
   const [mercadoPagoQuote, setMercadoPagoQuote] = useState<MercadoPagoService.MercadoPagoQuote>()
   const [checkoutPayload, setCheckoutPayload] = useState<bookcarsTypes.CheckoutPayload>()
-  const [qrCode, setQrCode] = useState<string>()
+  const [mercadoPagoMethod, setMercadoPagoMethod] = useState<'card' | 'yape'>('card')
 
   const birthDateRef = useRef<HTMLInputElement | null>(null)
   const additionalDriverBirthDateRef = useRef<HTMLInputElement | null>(null)
@@ -1047,14 +1048,30 @@ const Checkout = () => {
                           : env.PAYMENT_GATEWAY === bookcarsTypes.PaymentGateway.MercadoPago
                             ? (mercadoPagoReady && checkoutPayload && mercadoPagoQuote && bookingId && sessionId && (
                               <div className="payment-options-container">
-                                {qrCode ? (
-                                  <div className="yape-qr-container" style={{ textAlign: 'center', padding: '20px' }}>
-                                    <h3>Escanea el QR con Yape</h3>
-                                    <img src={`data:image/png;base64,${qrCode}`} alt="Yape QR" style={{ width: '200px', display: 'block', margin: '0 auto 20px auto' }} />
-                                    <p>{strings.PAYMENT_PENDING}</p>
-                                    <Button variant="contained" onClick={() => navigate('/')}>{commonStrings.CLOSE}</Button>
-                                  </div>
-                                ) : (
+                                <RadioGroup
+                                  row
+                                  value={mercadoPagoMethod}
+                                  onChange={(event) => {
+                                    setMercadoPagoMethod(event.target.value as 'card' | 'yape')
+                                    setPaymentFailed(false)
+                                    setPaymentPending(false)
+                                  }}
+                                  style={{ marginBottom: 16 }}
+                                >
+                                  <FormControlLabel
+                                    value="card"
+                                    control={<Radio />}
+                                    label={language === 'es' ? 'Tarjeta' : 'Card'}
+                                  />
+                                  <FormControlLabel
+                                    value="yape"
+                                    control={<Radio />}
+                                    disabled={mercadoPagoQuote.currency !== 'PEN'}
+                                    label="Yape"
+                                  />
+                                </RadioGroup>
+
+                                {mercadoPagoMethod === 'card' ? (
                                   <Payment
                                     initialization={{ amount: mercadoPagoQuote.amount }}
                                     customization={{ paymentMethods: { creditCard: 'all', debitCard: 'all', prepaidCard: 'all' } }}
@@ -1064,9 +1081,8 @@ const Checkout = () => {
                                         setPaymentFailed(false)
                                         setPaymentPending(false)
 
-                                        const payerEmail = checkoutPayload.driver?.email || user?.email || formData.payer?.email
                                         const idempotencyKey = mercadoPagoIdempotencyKeyRef.current
-                                        if (!payerEmail || !idempotencyKey) {
+                                        if (!idempotencyKey) {
                                           setPaymentFailed(true)
                                           return
                                         }
@@ -1075,35 +1091,62 @@ const Checkout = () => {
                                           bookingId,
                                           reservationSessionId: sessionId,
                                           formData: formData as MercadoPagoService.MercadoPagoBrickFormData,
-                                          payerEmail,
                                           idempotencyKey,
                                         })
 
-                                        if (res.qr_code_base64) {
-                                          setQrCode(res.qr_code_base64)
-                                          setPaymentPending(true)
-                                        } else if (res.status === 'approved') {
+                                        if (res.status === 'approved') {
                                           setVisible(false)
                                           setPaymentPending(false)
                                           setSuccess(true)
-                                        } else if (res.status === 'pending') {
+                                        } else if (res.status === 'pending' || res.status === 'creating') {
                                           setPaymentPending(true)
                                         } else {
                                           setPaymentFailed(true)
-                                          // A terminal rejection is a new deliberate payment attempt,
-                                          // so the next submit receives a fresh provider idempotency key.
-                                          mercadoPagoIdempotencyKeyRef.current = crypto.randomUUID()
+                                          // A provider-verified terminal result may start a new
+                                          // deliberate attempt with a fresh application key.
+                                          if (res.status === 'rejected' || res.status === 'cancelled') {
+                                            mercadoPagoIdempotencyKeyRef.current = crypto.randomUUID()
+                                          }
                                         }
                                       } catch (err) {
-                                        // Keep the same idempotency key after transport/server errors so
-                                        // a retry cannot create a second provider payment.
+                                        // Keep the key after ambiguous transport/server failures.
                                         console.error(err)
                                         setPaymentFailed(true)
                                       }
                                     }}
                                   />
+                                ) : (
+                                  <YapePayment
+                                    bookingId={bookingId}
+                                    reservationSessionId={sessionId}
+                                    idempotencyKey={mercadoPagoIdempotencyKeyRef.current || ''}
+                                    language={language}
+                                    onResult={(res) => {
+                                      setPaymentFailed(false)
+                                      if (res.status === 'approved') {
+                                        setVisible(false)
+                                        setPaymentPending(false)
+                                        setSuccess(true)
+                                      } else if (res.status === 'pending' || res.status === 'creating') {
+                                        setPaymentPending(true)
+                                      } else {
+                                        setPaymentPending(false)
+                                        setPaymentFailed(true)
+                                        if (res.status === 'rejected' || res.status === 'cancelled') {
+                                          mercadoPagoIdempotencyKeyRef.current = crypto.randomUUID()
+                                        }
+                                      }
+                                    }}
+                                    onError={(err) => {
+                                      // Tokenization/provider errors never expose phone, OTP or
+                                      // one-time token through Mitos logs/state.
+                                      console.error('Yape payment failed', err)
+                                      setPaymentFailed(true)
+                                    }}
+                                  />
                                 )}
-                                {paymentPending && !qrCode && (
+
+                                {paymentPending && (
                                   <div className="payment-info" style={{ marginTop: 12 }}>
                                     {strings.PAYMENT_PENDING}
                                   </div>
