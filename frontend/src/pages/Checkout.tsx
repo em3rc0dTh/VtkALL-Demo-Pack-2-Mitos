@@ -1033,7 +1033,7 @@ const Checkout = () => {
                                 ) : (
                                   <Payment
                                     initialization={{ amount: payDeposit ? depositPrice : payInFull ? (price + depositPrice - (clientTypeName === 'Insurance' ? deductible : 0)) : (price - (clientTypeName === 'Insurance' ? deductible : 0)) }}
-                                    customization={{ paymentMethods: { ticket: 'all', creditCard: 'all', debitCard: 'all' } }}
+                                    customization={{ paymentMethods: { creditCard: 'all', debitCard: 'all', prepaidCard: 'all' } }}
                                     locale={language === 'es' ? 'es-PE' : 'en-US'}
                                     onSubmit={async ({ formData }) => {
                                       try {
