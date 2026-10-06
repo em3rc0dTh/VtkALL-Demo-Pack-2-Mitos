@@ -19,6 +19,7 @@ declare module '@em3rc0d/m-pago' {
   export class PaymentError extends Error {
     code: string
     status: number
+    constructor(code: string, status?: number)
   }
   export class SQLitePaymentStore {
     constructor(filename: string)
