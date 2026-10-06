@@ -1055,16 +1055,26 @@ const Checkout = () => {
 
                                         if (res.qr_code_base64) {
                                           setQrCode(res.qr_code_base64)
-                                          // Create booking with Pending status
+                                          // Persist the booking using Mercado Pago's payment ID only
+                                          // as the external payment/session reference.
                                           const finalPayload = { ...checkoutPayload, sessionId: String(res.id) }
-                                          await BookingService.checkout(finalPayload)
+                                          const { status, bookingId: createdBookingId } = await BookingService.checkout(finalPayload)
+                                          if (status === 200) {
+                                            setBookingId(createdBookingId)
+                                            setSessionId(String(res.id))
+                                          } else {
+                                            helper.error()
+                                          }
                                         } else if (res.status === 'approved' || res.status === 'in_process') {
                                           const finalPayload = { ...checkoutPayload, sessionId: String(res.id) }
-                                          const { status } = await BookingService.checkout(finalPayload)
+                                          const { status, bookingId: createdBookingId } = await BookingService.checkout(finalPayload)
                                           if (status === 200) {
                                             setVisible(false)
                                             setSuccess(true)
-                                            setBookingId(res.id ? String(res.id) : undefined) // Use transaction ID as booking reference
+                                            // BookingStatus expects Mongo's Booking _id. Mercado Pago's
+                                            // numeric payment ID is kept separately as sessionId.
+                                            setBookingId(createdBookingId)
+                                            setSessionId(String(res.id))
                                           } else {
                                             helper.error()
                                           }
