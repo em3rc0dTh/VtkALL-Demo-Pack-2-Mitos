@@ -35,7 +35,7 @@ if (diagnosticPaymentId && env.MERCADO_PAGO_ACCESS_TOKEN) {
         console.error('[MP diagnostic] read-back failed', response.status)
         return
       }
-      const payment = await response.json()
+      const payment = await response.json() as any
       console.info('[MP diagnostic]', {
         id: String(payment.id),
         collectorId: String(payment.collector_id),
